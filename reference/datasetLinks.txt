@@ -1,0 +1,5 @@
+# Moive Review with Polarity: http://www.cs.cornell.edu/people/pabo/movie%2Dreview%2Ddata/
+# Amazon reviews: http://jmcauley.ucsd.edu/data/amazon/
+# Tweets Sentiment Analysis: https://competitions.codalab.org/competitions/17751#learn_the_details-datasets
+# Stanford Sentiment TreeBank: https://nlp.stanford.edu/sentiment/index.html
+# Large Movie Review Dataset: http://ai.stanford.edu/~amaas//data/sentiment/
