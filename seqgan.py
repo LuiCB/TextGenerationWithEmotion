@@ -24,9 +24,10 @@ class Discriminator(nn.Module):
         ])
         self.highway = nn.Linear(sum(num_filters), sum(num_filters))
         self.dropout = nn.Dropout(p=dropout)
-        self.lin = nn.Linear(sum(num_filters), num_classes)
-        self.clf_layer = nn.Linear(sum(num_filters), num_classes)
+        self.lin = nn.Linear(sum(num_filters), 1)
+        self.clf_layer = nn.Linear(sum(num_filters), 1)
         self.softmax = nn.Softmax()
+        self.sigmoid = nn.Sigmoid()
         self.init_parameters()
 
     def forward(self, x):
@@ -40,8 +41,8 @@ class Discriminator(nn.Module):
         pred = torch.cat(pools, 1)  # batch_size * num_filters_sum
         highway = self.highway(pred)
         pred = F.sigmoid(highway) * F.relu(highway) + (1. - F.sigmoid(highway)) * pred
-        pred1 = self.softmax(self.lin(self.dropout(pred)))
-        clf = self.softmax(self.clf_layer(self.dropout(pred)))
+        pred1 = self.sigmoid(self.lin(self.dropout(pred)))
+        clf = self.sigmoid(self.clf_layer(self.dropout(pred)))
         return pred1, clf
 
     def init_parameters(self):
@@ -129,6 +130,8 @@ class Generator(nn.Module):
             word = torch.multinomial(word, 1).type(torch.long)
             sentences.append(word)
         sentences = torch.cat(sentences, 1)
+
+        self.train()
         return sentences
 
 
@@ -165,7 +168,8 @@ if __name__ == '__main__':
 
     generator = Generator(embd.size(0), embd.size(1), 64 + 1, gpu, pretrained_emb=embd).to(device)
 
-    pretrain_epoch_num = 2000
+    print('Pretraining Generator.')
+    pretrain_epoch_num = 20000
     optim = torch.optim.Adam(generator.parameters(), lr=lr)
     for epoch in range(pretrain_epoch_num):
         total_loss = 0
@@ -181,11 +185,16 @@ if __name__ == '__main__':
         total_loss.backward()
         optim.step()
 
-        if epoch % 100 == 0:
-            print(total_loss.item())
+        if (epoch+1) % 500 == 0:
+            print('Epoch {}: Loss {}'.format(epoch, total_loss.item()))
+            sampled = generator.sample(2, torch.Tensor([0, 1]))
+            for i in range(2):
+                print('{}: {}'.format(dataset.idx2label(0), dataset.idxs2sentence(sampled[i, :])))
 
+
+    print('Pretraining Discriminator')
     generator.eval()
-    optim = torch.optim.Adam(discriminator.parameters(), lr=lr)
+    optim = torch.optim.Adagrad(discriminator.parameters(), lr=lr)
     for epoch in range(pretrain_epoch_num):
         total_loss = 0
         inputs, labels = dataset.next_batch(args.gpu)
@@ -195,15 +204,15 @@ if __name__ == '__main__':
         emotion[int(batch_size / 2):] += 1
         generated_sentences = generator.sample(batch_size, emotion)
 
-        truth = torch.zeros(batch_size * 2).type(torch.long).to(device)
-        truth[batch_size:] += 1
-        emotion = torch.cat((labels[:, None], emotion[:, None].type(torch.long))).squeeze()
+        truth = torch.zeros(batch_size * 2).to(device)
+        truth[:batch_size] += 1
+        emotion = torch.cat((labels[:, None].type(torch.float), emotion[:, None])).squeeze()
 
         inputs = torch.cat((inputs, generated_sentences), 0)
         truth_prediction, emotion_prediction = discriminator(inputs)
 
-        truth_loss = F.cross_entropy(truth_prediction, truth)
-        emotion_loss = F.cross_entropy(emotion_prediction, emotion)
+        truth_loss = F.binary_cross_entropy(truth_prediction, truth)
+        emotion_loss = F.binary_cross_entropy(emotion_prediction, emotion)
 
         loss = truth_loss + 0.1 * emotion_loss
 
@@ -213,7 +222,59 @@ if __name__ == '__main__':
         loss.backward()
         optim.step()
 
-        if epoch % 100 == 0:
-            print(total_loss)
+        if (epoch+1) % 500 == 0:
+            print('Epoch {}: Loss {}'.format(epoch, total_loss))
 
+    adversarial_step_num = 10000
+    for step in range(adversarial_step_num):
+        for i in range(5):
+            emotion = torch.zeros(batch_size*2).to(device)
+            emotion[batch_size:] += 1
+            sampled = generator.sample(batch_size*2, emotion)
+
+            truth_prediction, emotion_prediction = discriminator(sampled)
+            emotion_loss = F.binary_cross_entropy(emotion_prediction, emotion)
+            rewards = truth_prediction - emotion_loss
+
+            batch_size, seq_len = sampled.size()
+            h, c, _ = generator.init_hidden(batch_size, seq_len)
+            h[:, :, -1] = emotion.expand(generator.lstm_layer_number, -1)
+            c[:, :, -1] = emotion.expand(generator.lstm_layer_number, -1)
+
+            action = torch.zeros(batch_size, seq_len)
+            action[:, 0] = generator.START_IDX
+            action[:, 1:] = sampled[:, seq_len - 1]
+
+            G = torch.zeros(seq_len, vocab_size)
+            t = batch_size - 1
+            G[t, action[:, t]] = rewards[:, t]
+            
+
+            loss = 0
+            for j in range(seq_len):
+                out, h, c = generator(sampled[i], h, c)
+
+        for i in range(5):
+            inputs, labels = dataset.next_batch(args.gpu)
+            inputs = inputs.transpose_(0, 1)
+            batch_size, seq_len = inputs.size()
+            emotion = torch.zeros(batch_size).to(device)
+            emotion[int(batch_size / 2):] += 1
+            generated_sentences = generator.sample(batch_size, emotion)
+
+            truth = torch.zeros(batch_size * 2).to(device)
+            truth[:batch_size] += 1
+            emotion = torch.cat((labels[:, None].type(torch.float), emotion[:, None])).squeeze()
+
+            inputs = torch.cat((inputs, generated_sentences), 0)
+            truth_prediction, emotion_prediction = discriminator(inputs)
+
+            truth_loss = F.binary_cross_entropy(truth_prediction, truth)
+            emotion_loss = F.binary_cross_entropy(emotion_prediction, emotion)
+
+            loss = truth_loss + emotion_loss
+
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
 
