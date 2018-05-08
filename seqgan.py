@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 
 import numpy as np
-
+import os
 import argparse
 
 from dataset import *
@@ -135,6 +135,35 @@ class Generator(nn.Module):
         return sentences
 
 
+def prepare_generator_batch(samples, start_letter=2, gpu=False):
+    """
+    Takes samples (a batch) and returns
+
+    Inputs: samples, start_letter, cuda
+        - samples: batch_size x seq_len (Tensor with a sample in each row)
+
+    Returns: inp, target
+        - inp: batch_size x seq_len (same as target, but with start_letter prepended)
+        - target: batch_size x seq_len (Variable same as samples)
+    """
+
+    batch_size, seq_len = samples.size()
+
+    inp = torch.zeros(batch_size, seq_len)
+    target = samples
+    inp[:, 0] = start_letter
+    inp[:, 1:] = target[:, :seq_len-1]
+
+    inp = inp.type(torch.long)
+    target = target.type(torch.long)
+
+    if gpu:
+        inp = inp.cuda()
+        target = target.cuda()
+
+    return inp, target
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', dest='lr', type=float,
@@ -153,6 +182,10 @@ if __name__ == '__main__':
 
     gpu = args.gpu
     lr = args.lr
+
+    model_dir = 'model'
+    if not os.path.exists(model_dir):
+        os.mkdir(model_dir)
 
     device = 'cuda' if gpu and torch.cuda.is_available() else 'cpu'
 
@@ -189,7 +222,7 @@ if __name__ == '__main__':
             print('Epoch {}: Loss {}'.format(epoch, total_loss.item()))
             sampled = generator.sample(2, torch.Tensor([0, 1]))
             for i in range(2):
-                print('{}: {}'.format(dataset.idx2label(0), dataset.idxs2sentence(sampled[i, :])))
+                print('{}: {}'.format(dataset.idx2label(i), dataset.idxs2sentence(sampled[i, :])))
 
 
     print('Pretraining Discriminator')
@@ -225,9 +258,12 @@ if __name__ == '__main__':
         if (epoch+1) % 500 == 0:
             print('Epoch {}: Loss {}'.format(epoch, total_loss))
 
-    adversarial_step_num = 10000
+    adversarial_step_num = 50000
+    gen_optim = torch.optim.Adam(generator.parameters(), lr=lr)
+    dis_optim = torch.optim.Adagrad(discriminator.parameters(), lr=lr)
     for step in range(adversarial_step_num):
         for i in range(5):
+            batch_size = 32
             emotion = torch.zeros(batch_size*2).to(device)
             emotion[batch_size:] += 1
             sampled = generator.sample(batch_size*2, emotion)
@@ -237,22 +273,35 @@ if __name__ == '__main__':
             rewards = truth_prediction - emotion_loss
 
             batch_size, seq_len = sampled.size()
-            h, c, _ = generator.init_hidden(batch_size, seq_len)
+            h, c, _ = generator.init_hidden(batch_size, random=True)
             h[:, :, -1] = emotion.expand(generator.lstm_layer_number, -1)
             c[:, :, -1] = emotion.expand(generator.lstm_layer_number, -1)
 
-            action = torch.zeros(batch_size, seq_len)
-            action[:, 0] = generator.START_IDX
-            action[:, 1:] = sampled[:, seq_len - 1]
+            # action = torch.zeros(batch_size, seq_len)
+            # action[:, 0] = generator.START_IDX
+            # action[:, 1:] = sampled[:, seq_len - 1]
 
-            G = torch.zeros(seq_len, vocab_size)
-            t = batch_size - 1
-            G[t, action[:, t]] = rewards[:, t]
-            
+            # G = torch.zeros(seq_len, vocab_size)
+            # t = batch_size - 1
+            # G[t, action[:, t]] = rewards[:, t]
+
+            # action = action.transpose_(0, 1)
+
+            inp, target = prepare_generator_batch(sampled, gpu=True)
+            inp = inp.permute(1, 0)  # seq_len x batch_size
+            target = target.permute(1, 0)  # seq_len x batch_size
 
             loss = 0
             for j in range(seq_len):
-                out, h, c = generator(sampled[i], h, c)
+                out, h, c = generator(inp[j, :].unsqueeze(1), h, c)
+                for k in range(batch_size):
+                    loss += -out[k][target.data[j, k]] * rewards[k, :]
+            loss /= batch_size
+
+            gen_optim.zero_grad()
+            loss.backward()
+            gen_optim.step()
+
 
         for i in range(5):
             inputs, labels = dataset.next_batch(args.gpu)
@@ -274,7 +323,15 @@ if __name__ == '__main__':
 
             loss = truth_loss + emotion_loss
 
-            optim.zero_grad()
+            dis_optim.zero_grad()
             loss.backward()
-            optim.step()
+            dis_optim.step()
 
+        label = [0, 0, 0, 1, 1, 1]
+        if (step+1) % 500 == 0:
+            print('Epoch {}'.format(step+1))
+            sampled = generator.sample(6, torch.Tensor([0, 0, 0, 1, 1, 1]))
+            for i in range(6):
+                print('{}: {}'.format(dataset.idx2label(label[i]), dataset.idxs2sentence(sampled[i, :])))
+            torch.save(generator.state_dict(), os.path.join(model_dir, 'generator-{}'.format(step+1)))
+            torch.save(discriminator.state_dict(), os.path.join(model_dir, 'discriminator-{}'.format(step+1)))
