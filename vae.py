@@ -1,17 +1,24 @@
 #-*- coding:utf-8 -*-
 
 '''
+Author: Luyi Ma
 variational auto-encoder for Text Generation with Emotion
-    
+
 Design:
-    LSTM -->
+    input --> LSTM --> z = f(h) --> LSTM --> output
 '''
+
+
 import numpy as np 
 import tensorflow as tf
 import DataHub as DH
 from tensorflow.contrib.seq2seq import *
 from tensorflow.python.layers.core import Dense
 
+
+'''
+Hyper-parameters
+'''
 
 batch_size = 1
 lstm_size = 400
@@ -28,11 +35,16 @@ device_cf = tf.ConfigProto(device_count={'CPU': 3},
 vocabulary_size = 10000
 embedding_size = 400
 SHAPE = [vocabulary_size, embedding_size]
+LENGTH = 152 # THE max length for text genreation
 T = 1.0
-LENGTH = 152
 clip_ratio = 2.5
 lstm_layer = 1
 
+
+'''
+VAEmo: the class of the variational auto-encoder based model
+       for controlled text generation.
+'''
 class VAEmo:
     def __init__(self, shape, t):
         # shape: [vocabulary_size, embedding_size]
@@ -40,100 +52,31 @@ class VAEmo:
         self.embed = tf.Variable(tf.random_uniform(shape, -t, t),
                                  name="embedding")
    
+    '''
+    wrapper, to build multi-layer lstm model
+    '''
     def _get_simple_lstm(self, rnn_size, layer_size):
         lstm_layers = [tf.contrib.rnn.LSTMCell(rnn_size) for _ in xrange(layer_size)]
         return tf.contrib.rnn.MultiRNNCell(lstm_layers)
 
+    '''
+    wrapper, to get the variable under the specific scope name
+    '''
     def _get_scope_variable(self, name):
         with tf.variable_scope(name):
             return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, 
                     scope=tf.get_variable_scope().name)
+
     '''
-    pretrain data model with two LSTM model to do the reconstruction
-    objective is the reconstruction error (metric: mse)
+    build the final model for the VAE-based model for controlled text generation.
+    parameter:
+        grad_clip: user defined norm for graident clipping, 
+                   to adjust the gradient by the global norm 
+                   t_list[i] * clip_norm / max(global_norm, clip_norm)
+                   global_norm = sqrt(sum([l2norm(t)**2 for t in t_list]))
+        is_train: a flag to define the model structure for either training 
+                  or evaluation.
     '''
-    def build_pretrain(self, grad_clip, is_train=1, pre_train=1):
-        # data: training data, list of list of word id, with shape [batch_size, None]
-        data = tf.placeholder(tf.int32, shape=[None, None])
-        
-        with tf.variable_scope("encoder"):
-            encoder = self._get_simple_lstm(lstm_size, 1)
-        words = tf.nn.embedding_lookup(self.embed, data)
-        encoder_outputs, encoder_state = tf.nn.dynamic_rnn(encoder, words, dtype=tf.float32)
-
-        
-        # define the helper of seq2seq model
-        if is_train == 0:
-            # do inference
-            self.start_tokens = tf.placeholder(tf.int32, shape=[None], name='start_tokens')
-            self.end_tokens = tf.placeholder(tf.int32, shape=[None], name="end_tokens")
-            helper = GreedyEmbeddingHelper(self.embed, self.start_tokens, self.end_token)
-        elif is_train == 1:
-            self.decoder_seq_length = tf.placeholder(tf.int32, shape=[None], name='decoder_seq_length')
-            helper = TrainingHelper(words, self.decoder_seq_length)
-
-        with tf.variable_scope("decoder"):
-            fc_layer = Dense(self.shape[0])
-            decoder_cell = self._get_simple_lstm(lstm_size, 1)
-            decoder = BasicDecoder(decoder_cell, helper, encoder_state, fc_layer)
-
-        # decoding
-        logits, final_state, final_sequence_lengths = dynamic_decode(decoder)
-        
-        if is_train == 0:
-            loss = tf.nn.softmax(logits)
-            train_op = None
-        elif is_train == 1:
-            # train
-            targets = tf.reshape(data, [-1])
-            logits_flatten = tf.reshape(logits.rnn_output, [-1, self.shape[0]])
-            loss = tf.losses.sparse_softmax_cross_entropy(targets, logits_flatten)
-            tvars = tf.trainable_variables()
-            grads, _ = tf.clip_by_global_norm(tf.gradients(loss, tvars), grad_clip)
-
-            optimizer = tf.train.AdamOptimizer(pretrain_lr)
-            train_op = optimizer.apply_gradients(zip(grads, tvars))
-
-        encoder_weight = self._get_scope_variable("encoder")
-        decoder_weight = self._get_scope_variable("decoder")
-        embed_weight = self._get_scope_variable("embedding")
-        print type(encoder_weight)
-        weights = encoder_weight + decoder_weight + embed_weight
-        saver = tf.train.Saver(weights)
-        print tf.trainable_variables()
-        print weights
-        return train_op, loss, saver, data
-
-    def pretrain(self, wm, epoch, out="./", model=None):
-        # data: words ids, wm.getBatch() return this iterator
-        train_op, loss, saver, data = self.build_pretrain(clip_ratio)
-        
-        with tf.Session(config=device_cf) as sess:
-            tf.global_variables_initializer().run()
-            if (model is not None):
-                saver.restore(sess, model)
-
-            for i in range(epoch):
-                ave_loss = 0
-                sentences = wm.getBatch()
-                count = 0.0
-                for sen in sentences:
-                    length = [len(s) for s in sen]
-                    _, _loss = sess.run([train_op, loss], 
-                                        feed_dict={data: sen, 
-                                                   self.decoder_seq_length:length})
-                    count += 1
-                    ave_loss += (_loss - ave_loss) / count
-
-                print "epoch %d+1, ave_loss: %f"%(count, ave_loss)
-                if i % 10 == 0:
-                    saver.save(sess, out + '/' + "pretrain")
-                    print "*** model updated ***"
-
-        saver.save(sess, out + '/' + "pretrain")
-        print "*** model updated ***"
-
-
     def build_model(self, grad_clip, is_train=1):
         data = tf.placeholder(tf.int32, shape=[1, None], name="input_id")
         train_data = tf.placeholder(tf.int32, shape=[1, None], name="train_id")
@@ -171,7 +114,7 @@ class VAEmo:
             self.decoder_seq_length = tf.placeholder(tf.int32, shape=[None],
                                                      name='decoder_seq_length')
             '''
-            bugs: since it is an auto-encoder, the input of the traininghelper
+            NOTICE: since it is an auto-encoder, the input of the traininghelper
                   is the first n-1 words and the output is the last n-1 words
                   Otherwise, it will be just an identity transformation
             '''
@@ -179,9 +122,10 @@ class VAEmo:
             helper = TrainingHelper(decoder_input, self.decoder_seq_length)
                    
         with tf.variable_scope("decoder"):
+            # decoder, use the latent variable to compute the new initial hidden state
+            # and the cell state for the decoding lstm model.
             fc_rec = Dense(lstm_size)
             fc_rec2 = Dense(lstm_size)
-            print self.Z.shape
             decoder_h = fc_rec(self.Z)
             decoder_c = fc_rec2(self.Z)
             fc_layer = Dense(self.shape[0])
@@ -211,12 +155,19 @@ class VAEmo:
             grads, _ = tf.clip_by_global_norm(tf.gradients(loss, tvars), grad_clip)
             optimizer = tf.train.AdamOptimizer(pretrain_lr)
             train_op = optimizer.apply_gradients(zip(grads, tvars)) # minimize the loss
-            return train_op, loss, data, train_data, train_label, z_0, epsilon, DL_loss, cross_ent, targets, logits_flatten, var_approx, mean_approx_1
+            return train_op, loss, data, train_data, train_label, z_0, epsilon
 
-
+    '''
+    run the training process of the final model. Both epoch information and the averaged loss
+    will be printed and stored in a log file.
+    parameter:
+        wm:  a WordManager instance
+        out: output directory
+        model: model path of the trained model
+    '''
     def train(self, wm, epoch, out=".", model=None):
         # data: words ids, wm.getBatch() return this iterator
-        train_op, loss, data, train_data, train_label, z_0, epsilon, DL_loss, cross_ent, targets, logits_flatten, var_approx, mean_approx = self.build_model(clip_ratio)
+        train_op, loss, data, train_data, train_label, z_0, epsilon = self.build_model(clip_ratio)
         saver = tf.train.Saver()
         log = open(out + "/model_log.txt", 'w')
         with tf.Session(config=device_cf) as sess:
@@ -232,31 +183,20 @@ class VAEmo:
                 for (sen, tag) in sentences:
                     length = [len(s)-1 for s in sen]
                     epsilon_val = np.random.normal(scale=0.1, size=(len(sen), ))
-                    Zval, _, _loss, dl_loss, cross_loss, _targets, _logits_flatten, var, mean = sess.run([self.Z, train_op, loss, DL_loss, 
-                                                                                               cross_ent, targets, logits_flatten, 
-                                                                                               var_approx, mean_approx], 
-                                                                                           feed_dict={data: sen, 
-                                                                                                      train_data: [sen[0][:-1]],
-                                                                                                      train_label: [sen[0][1:]],
-                                                                                                      self.decoder_seq_length:length,
-                                                                                                      z_0: tag, 
-                                                                                                      epsilon: epsilon_val})
+                    _, _loss = sess.run([train_op, loss], 
+                                        feed_dict={data: sen, 
+                                                  train_data: [sen[0][:-1]],
+                                                  train_label: [sen[0][1:]],
+                                                  self.decoder_seq_length:length,
+                                                  z_0: tag, 
+                                                  epsilon: epsilon_val})
                     count += 1
                     
 
                     ave_loss += (_loss - ave_loss) / count
                     if count % 100 == 0:
-                        print "### iter: %d loss: "%(count), ave_loss, _loss, dl_loss, cross_loss
-                        print ">>> Z val: ", Zval, tag, 2*tag[0] - 1 + epsilon_val[0], mean, var
-                        print _targets
-                        _ids = np.argmax(_logits_flatten, axis=1)
-                        print _ids
-                        print "+++: ",  wm.getWordFromIdx(sen[0][1:])
-                        print "---: ", wm.getWordFromIdx(_ids)
-                    if count == 1 and i == 0:
-                        print "start loss: %f"%(ave_loss)
-                        log.write("start loss: %f \n"%(ave_loss))
-
+                        print "epoch {}, averaged loss: {}".format(i+1, ave_loss)
+                        log.write("epoch {}, averaged loss: {}\n".format(i+1, ave_loss))
                 print "epoch %d, ave_loss: %f"%(i, ave_loss)
                 log.write("epoch %d, ave_loss: %f \n"%(i, ave_loss))
                 saver.save(sess, out + '/' + "model2")
@@ -268,6 +208,14 @@ class VAEmo:
         saver.save(sess, out + '/' + "model2")
         print "*** model updated ***"
 
+    '''
+    run the evaluation process
+    parameter:
+        wm: is the instance of WordManager class
+        _z_0: is a list of discriminator 
+        _epsilon: normal noise
+        model: the model instance
+    '''
     def predict(self, wm,  _z_0, _epsilon, model):
         predict, loss = self.build_model(clip_ratio, is_train=0)
         saver = tf.train.Saver()
@@ -279,7 +227,10 @@ class VAEmo:
                 print "load model"
             rst = {}
             for i in range(len(_z_0)):
-                _ids, _loss = sess.run([predict, loss], feed_dict={self.Z: [[_z_0[i] + _epsilon[i]]], self.start_tokens:[SOS], self.end_tokens:EOS})
+                _ids, _loss = sess.run([predict, loss], 
+                                       feed_dict={self.Z: [[_z_0[i] + _epsilon[i]]], 
+                                                  self.start_tokens:[SOS], # a list of possible start words
+                                                  self.end_tokens:EOS})
                 rst[(_z_0[i], _epsilon[i])] = wm.getWordFromIdx(_ids)
                 print _loss, self.Z
             return rst
@@ -292,13 +243,14 @@ if __name__ == "__main__":
     DM = DH.DataManager()
     DM.buildModel(totaldata).buildLookupTabel()
     mp = DM.wordMap
-    print mp["SOS"], mp["EOS"], mp["UNK"], len(mp)
     wm = DM.data4NN(traindata2, traindata, 1)
     epoch = 50
     data = wm.getBatch()
     model = VAEmo(SHAPE, T)
+    # training
     model_p = "./model2"
     model.train(wm, epoch, model=model_p)
+    ## predicttion
     # model_p = "./model2"
     # prediction = model.predict(wm, [-1, -1, 1, 1], [0.01,0.001, 0.01, 0.001], model=model_p)
     # print prediction
