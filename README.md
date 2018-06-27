@@ -15,3 +15,4 @@ Since this two distributions are symmetric, we just use one
 latent variable Z to model it.
 
 
+$$\tilde{\textbf{ELBO}} &= \frac{1}{2} (\log \sigma^2 - \mu^2 - \sigma^2 + \mu) + \log P_{\theta}(\mathbf{x} | Z)$$
