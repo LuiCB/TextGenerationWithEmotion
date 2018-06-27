@@ -14,5 +14,8 @@ a normal distribution with the mean at 1 and -1 respectively.
 Since this two distributions are symmetric, we just use one
 latent variable Z to model it.
 
+### SeqGAN with emotion
 
-$$\tilde{\textbf{ELBO}} &= \frac{1}{2} (\log \sigma^2 - \mu^2 - \sigma^2 + \mu) + \log P_{\theta}(\mathbf{x} | Z)$$
+Follow Yang's work, (Yang et al., 2017), we used PyTorch to implement SeqGAN with emotion, we
+also used torchtext for a simpler usage and access to the
+datasets.
